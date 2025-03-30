@@ -173,7 +173,7 @@ int main(int argc, char* argv[]) {
             }
             csv << r.height << ',' << r.hash << ',' << r.real_reward << ','
                 << r.coinbase_outputs << ',' << r.total_mined << ','
-                << r.issues_string() << ',' << r.status << '\n';
+                << (r.issues.empty() ? "Nenhum" : r.issues_string()) << ',' << r.status << '\n';
             csv.close();
 
             log("[INFO] Bloco " + std::to_string(r.height) + " escrito no CSV: status=" + r.status);
@@ -189,7 +189,28 @@ int main(int argc, char* argv[]) {
         log("[INFO] Auditando bloco único: " + std::to_string(single_block));
         auto res = audit_block(single_block);
         if (res.has_value()) {
-            write_to_csv(res.value());
+            auto result = res.value();
+            // Imprime detalhes no terminal
+            std::cout << "Bloco " << result.height << ":\n"
+                      << "  Hash: " << result.hash << "\n"
+                      << "  Recompensa Real: " << result.real_reward << "\n"
+                      << "  Saídas Coinbase: " << result.coinbase_outputs << "\n"
+                      << "  Total Minerado: " << result.total_mined << "\n"
+                      << "  Problemas: " << (result.issues.empty() ? "Nenhum" : result.issues_string()) << "\n"
+                      << "  Status: " << result.status << "\n";
+            
+            // Escreve diretamente no CSV para modo --block
+            std::ofstream csv(csv_path, std::ios::app);
+            if (!csv.is_open()) {
+                std::cerr << "[ERRO] Não foi possível abrir o arquivo CSV para escrita: " << csv_path << std::endl;
+                log("[ERRO] Não foi possível abrir o arquivo CSV para escrita: " + csv_path);
+                return 1;
+            }
+            csv << result.height << ',' << result.hash << ',' << result.real_reward << ','
+                << result.coinbase_outputs << ',' << result.total_mined << ','
+                << (result.issues.empty() ? "Nenhum" : result.issues_string()) << ',' << result.status << '\n';
+            csv.close();
+            log("[INFO] Bloco " + std::to_string(result.height) + " escrito no CSV: status=" + result.status);
         } else {
             std::cerr << "[ERRO] Auditoria falhou para o bloco " << single_block << std::endl;
             log("[ERRO] Auditoria falhou para o bloco " + std::to_string(single_block), true);
