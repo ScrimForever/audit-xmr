@@ -18,7 +18,6 @@ using json = nlohmann::json;
 // Nome do arquivo de log de debug
 std::string g_log_path = "audit_check_debug.log";
 
-
 // Função para carregar configurações do arquivo cfg
 std::map<std::string, std::string> load_config(const std::string &config_file) {
     std::map<std::string, std::string> config;
@@ -31,7 +30,6 @@ std::map<std::string, std::string> load_config(const std::string &config_file) {
         std::istringstream iss(line);
         std::string key, value;
         if(std::getline(iss, key, '=') && std::getline(iss, value)) {
-            // Remover espaços em branco
             key.erase(0, key.find_first_not_of(" \t"));
             key.erase(key.find_last_not_of(" \t") + 1);
             value.erase(0, value.find_first_not_of(" \t"));
@@ -88,30 +86,59 @@ int main(int argc, char* argv[]) {
             server = argv[++i];
         }
     }
-    if(server.empty()){
-        auto config = load_config("audit-xmr.cfg");
-        if(config.find("rpc_url") != config.end()){
-            server = config["rpc_url"];
-        }
+
+    auto config = load_config("audit-xmr.cfg");
+    if(server.empty() && config.find("rpc_url") != config.end()) {
+        server = config["rpc_url"];
     }
-    if(!server.empty()){
-        // Se não incluir o protocolo, assume http://
+
+    // Exibir configurações usadas com formatação consistente
+    cout << "------------------------\n";
+    cout << "Configurações do audit-xmr-check\n";
+    cout << "------------------------\n";
+    if (!server.empty()) {
         if(server.find("http://") == std::string::npos && server.find("https://") == std::string::npos)
             server = "http://" + server;
-        // Se não conter "/json_rpc", acrescenta-o
         if(server.find("/json_rpc") == std::string::npos)
             server = server + "/json_rpc";
+        cout << "RPC URL: " << server << "\n";
+        cout << "  (Origem: " << (config.find("rpc_url") != config.end() ? "audit-xmr.cfg" : "--server") << ")\n";
         set_rpc_url(server);
         log_message(g_log_path, "Server RPC configurado: " + server);
     } else {
+        server = "http://127.0.0.1:18081/json_rpc"; // Padrão
+        cout << "RPC URL: " << server << "\n";
+        cout << "  (Origem: padrão)\n";
+        set_rpc_url(server);
         log_message(g_log_path, "Nenhum servidor RPC definido; usando o padrão.");
     }
+    cout << "Log Path: " << g_log_path << "\n";
+    cout << "  (Origem: padrão)\n";
+    cout << "------------------------\n";
+    cout << "Nota: Configs do audit-xmr.cfg não usadas aqui:\n";
+    if (config.find("threads") != config.end()) {
+        cout << "- Threads: " << config["threads"] << "\n";
+    }
+    if (config.find("output_dir") != config.end()) {
+        cout << "- Output Dir: " << config["output_dir"] << "\n";
+    }
+    if (config.find("max_retries") != config.end()) {
+        cout << "- Max Retries: " << config["max_retries"] << "\n";
+    }
+    if (config.find("timeout") != config.end()) {
+        cout << "- Timeout: " << config["timeout"] << "\n";
+    }
+    cout << "------------------------\n\n";
 
     // Carrega os registros do arquivo CSV
+    if (argc < 2) {
+        cerr << "Uso: " << argv[0] << " <arquivo.csv>" << endl;
+        return 1;
+    }
     string csvFilename = argv[1];
     ifstream infile(csvFilename);
     if(!infile.is_open()){
-        cerr << "Error opening file: " << csvFilename << endl;
+        cerr << "Erro: não foi possível abrir o arquivo " << csvFilename << endl;
         log_message(g_log_path, "Erro: não foi possível abrir o arquivo CSV: " + csvFilename);
         return 1;
     }
@@ -135,13 +162,15 @@ int main(int argc, char* argv[]) {
     log_message(g_log_path, "Arquivo CSV lido com " + std::to_string(csvRecords.size()) + " registros.");
 
     int okCount = 0, errorCount = 0;
+    cout << "------------------------\n";
+    cout << "Resultados da Validação\n";
+    cout << "------------------------\n";
     for(const auto& rec : csvRecords) {
          log_message(g_log_path, "Auditoria do bloco " + std::to_string(rec.height) + " iniciada.");
          auto auditResultOpt = audit_block(rec.height);
          if(!auditResultOpt.has_value()){
-             cout << "Bloco " << rec.height << ": erro ao auditar via RPC" << endl;
+             cout << "Bloco " << setw(6) << rec.height << ": ERRO (falha ao auditar via RPC)\n";
              log_message(g_log_path, "Erro: audit_block(" + std::to_string(rec.height) + ") retornou null.");
-             // Debug: chama get_block_info para exibir a resposta bruta
              json blockInfo = get_block_info(rec.height);
              if(blockInfo.is_null()){
                  log_message(g_log_path, "Debug: get_block(" + std::to_string(rec.height) + ") retornou null.");
@@ -156,44 +185,48 @@ int main(int argc, char* argv[]) {
          ostringstream details;
          if(auditResult.real_reward != rec.real_reward) {
              match = false;
-             details << "RecompensaReal (CSV: " << rec.real_reward 
+             details << "RecompensaReal (CSV: " << rec.real_reward
                      << ", RPC: " << auditResult.real_reward << ") ";
          }
          if(auditResult.coinbase_outputs != rec.coinbase_outputs) {
              match = false;
-             details << "CoinbaseOutputs (CSV: " << rec.coinbase_outputs 
+             details << "CoinbaseOutputs (CSV: " << rec.coinbase_outputs
                      << ", RPC: " << auditResult.coinbase_outputs << ") ";
          }
          if(auditResult.total_mined != rec.total_mined) {
              match = false;
-             details << "TotalMinerado (CSV: " << rec.total_mined 
+             details << "TotalMinerado (CSV: " << rec.total_mined
                      << ", RPC: " << auditResult.total_mined << ") ";
          }
-         if(auditResult.issues_string() != rec.issues) {
+         string csv_issues = (rec.issues == "Nenhum" ? "" : rec.issues);
+         if(auditResult.issues_string() != csv_issues) {
              match = false;
-             details << "Issues (CSV: " << rec.issues 
+             details << "Issues (CSV: " << rec.issues
                      << ", RPC: " << auditResult.issues_string() << ") ";
          }
          if(auditResult.status != rec.status) {
              match = false;
-             details << "Status (CSV: " << rec.status 
+             details << "Status (CSV: " << rec.status
                      << ", RPC: " << auditResult.status << ") ";
          }
          if(match) {
-             cout << "Bloco " << rec.height << ": OK" << endl;
+             cout << "Bloco " << setw(6) << rec.height << ": OK\n";
              log_message(g_log_path, "Bloco " + std::to_string(rec.height) + " auditado: OK.");
              okCount++;
          } else {
-             cout << "Bloco " << rec.height << ": ERRO (" << details.str() << ")" << endl;
+             cout << "Bloco " << setw(6) << rec.height << ": ERRO (" << details.str() << ")\n";
              log_message(g_log_path, "Bloco " + std::to_string(rec.height) + " auditado: ERRO (" + details.str() + ").");
              errorCount++;
          }
     }
 
-    ostringstream summary;
-    summary << "Resumo: " << okCount << " blocos OK, " << errorCount << " blocos com discrepâncias.";
-    cout << summary.str() << endl;
-    log_message(g_log_path, summary.str());
+    cout << "------------------------\n";
+    cout << "Resumo da Validação\n";
+    cout << "------------------------\n";
+    cout << "Blocos OK:       " << setw(6) << okCount << "\n";
+    cout << "Blocos com erro: " << setw(6) << errorCount << "\n";
+    cout << "------------------------\n";
+    log_message(g_log_path, "Resumo: " + std::to_string(okCount) + " blocos OK, " + std::to_string(errorCount) + " blocos com discrepâncias.");
     log_message(g_log_path, "Validação via RPC finalizada.");
     return 0;
 }
