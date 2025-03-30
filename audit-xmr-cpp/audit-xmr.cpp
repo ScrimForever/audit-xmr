@@ -28,6 +28,8 @@
 #define VER "0.1"
 
 std::string g_log_path;
+std::mutex cout_mutex; // Para sincronizar saída no terminal
+std::atomic<int> blocks_written(0); // Contador global de blocos escritos
 
 std::map<std::string, std::string> load_config(const std::string& config_file) {
     std::map<std::string, std::string> config;
@@ -61,13 +63,14 @@ void print_progress(int current, int total) {
     float progress = (float)current / total;
     int pos = bar_width * progress;
 
+    std::lock_guard<std::mutex> lock(cout_mutex);
     std::cout << "\rProgresso: [";
     for (int i = 0; i < bar_width; ++i) {
         if (i < pos) std::cout << "=";
         else if (i == pos) std::cout << ">";
         else std::cout << " ";
     }
-    std::cout << "] " << int(progress * 100.0) << "% (Bloco " << current << " de " << total << ")" << std::flush;
+    std::cout << "] " << int(progress * 100.0) << "% (" << current << "/" << total << ")" << std::flush;
 }
 
 int main(int argc, char* argv[]) {
@@ -152,7 +155,7 @@ int main(int argc, char* argv[]) {
         log_message(log_path, msg, is_block_end);
     };
 
-    // Exibir configurações com o novo visual
+    // Exibir configurações
     std::cout << "------------------------\n";
     std::cout << "Configurações do audit-xmr\n";
     std::cout << "------------------------\n";
@@ -189,7 +192,7 @@ int main(int argc, char* argv[]) {
         csv.close();
     }
 
-    auto write_to_csv = [&](const AuditResult& res) {
+    auto write_to_csv = [&](const AuditResult& res, int total_blocks) {
         std::unique_lock<std::mutex> lock(csv_mutex);
         pending_results[res.height] = res;
 
@@ -207,7 +210,10 @@ int main(int argc, char* argv[]) {
             csv.close();
 
             log("[INFO] Bloco " + std::to_string(r.height) + " escrito no CSV: status=" + r.status);
-            std::cout << "Bloco " << std::setw(6) << r.height << " escrito no CSV\n";
+            blocks_written++; // Incrementa o contador global
+            if (total_blocks > 0) { // Só exibe progresso no modo intervalo
+                print_progress(blocks_written, total_blocks);
+            }
 
             pending_results.erase(next_block_to_write);
             next_block_to_write++;
@@ -275,14 +281,14 @@ int main(int argc, char* argv[]) {
         int thread_count = std::max(1, user_thread_count);
         int total_blocks = end_block - start_block + 1;
         next_block_to_write = start_block;
+        blocks_written = 0; // Inicializa o contador
 
         auto worker = [&](int tid, int from, int to) {
             for (int h = from; h <= to; ++h) {
                 log("[DEBUG] Thread " + std::to_string(tid) + " auditando bloco " + std::to_string(h));
                 auto res = audit_block(h);
                 if (res.has_value()) {
-                    write_to_csv(res.value());
-                    print_progress(h - start_block + 1, total_blocks);
+                    write_to_csv(res.value(), total_blocks);
                 } else {
                     log("[ERRO] Falha na auditoria do bloco " + std::to_string(h), true);
                 }
