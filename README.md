@@ -33,11 +33,11 @@
 ## Performance do Python vs C++
 Abaixo estão os resultados visuais comparando o desempenho das versões Python e C++ ao auditar blocos da blockchain Monero.
 
-- **Tempo de Execução para Intervalo Pequeno (ex.: 444-446)**
+- **Tempo de bloco unico (ex.: 445)**
   ![Comparação de Desempenho - Intervalo Pequeno](screenshots/compare1.png)
   *Legenda*: O C++ com multi-threading é significativamente mais rápido que o Python single-threaded para pequenos intervalos.
 
-- **Tempo de Execução para Intervalo Grande (ex.: 1000 blocos)**
+- **Tempo de bloco unico (ex.: 437654)**
   ![Comparação de Desempenho - Intervalo Grande](screenshots/compare2.png)
   *Legenda*: O C++ escalona melhor com o aumento do número de blocos, enquanto o Python mostra desempenho linear.
 
