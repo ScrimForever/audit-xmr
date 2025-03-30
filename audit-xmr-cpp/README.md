@@ -1,6 +1,7 @@
 emerge -av nlohmann_json
 
 zypper install gcc13 gcc13-c++
+
 update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 100
 
 g++ audit-xmr.cpp audit.cpp rpc.cpp -o audit-xmr -std=c++17 -lcurl -lpthread
