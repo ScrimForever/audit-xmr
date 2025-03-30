@@ -18,15 +18,6 @@ using json = nlohmann::json;
 // Nome do arquivo de log de debug
 std::string g_log_path = "audit_check_debug.log";
 
-// Função de log que escreve mensagens com timestamp no arquivo g_log_path
-void log_message(const std::string& log_path, const std::string& message) {
-    std::ofstream log_file(log_path, std::ios::app);
-    if (log_file.is_open()) {
-        auto now = std::chrono::system_clock::now();
-        std::time_t t = std::chrono::system_clock::to_time_t(now);
-        log_file << "[" << std::put_time(std::localtime(&t), "%Y-%m-%d %H:%M:%S") << "] " << message << "\n";
-    }
-}
 
 // Função para carregar configurações do arquivo cfg
 std::map<std::string, std::string> load_config(const std::string &config_file) {

@@ -1,6 +1,7 @@
 // audit-xmr.cpp
 #include "audit.hpp"
 #include "rpc.hpp"
+#include "log.hpp"
 #include <iostream>
 #include <vector>
 #include <string>
@@ -22,26 +23,12 @@
 #include <map>
 #include <chrono>
 #include <iomanip>
+#include <condition_variable>
 
 #define VER "0.1"
 
-// Variável global para o caminho do log
 std::string g_log_path;
 
-// Função de log com timestamp
-void log_message(const std::string& log_path, const std::string& message) {
-    auto now = std::chrono::system_clock::now();
-    auto time = std::chrono::system_clock::to_time_t(now);
-    std::stringstream timestamp;
-    timestamp << std::put_time(std::localtime(&time), "%Y-%m-%d %H:%M:%S");
-
-    std::ofstream log_file(log_path, std::ios::app);
-    if (log_file.is_open()) {
-        log_file << "[" << timestamp.str() << "] " << message << std::endl;
-    }
-}
-
-// Função para carregar configurações de um arquivo
 std::map<std::string, std::string> load_config(const std::string& config_file) {
     std::map<std::string, std::string> config;
     std::ifstream file(config_file);
@@ -72,27 +59,45 @@ int main(int argc, char* argv[]) {
     std::string config_file = "audit-xmr.cfg";
     auto config = load_config(config_file);
 
-    std::string rpc_url = config.count("rpc_url") ? config["rpc_url"] : "http://127.0.0.1:18081/json_rpc";
+    std::string rpc_url;
+    if (config.count("server")) {
+        std::string server_cfg = config["server"];
+        if (server_cfg.find(":") != std::string::npos) {
+            rpc_url = "http://" + server_cfg + "/json_rpc";
+        } else {
+            rpc_url = "http://" + server_cfg + ":18081/json_rpc";
+        }
+    } else if (config.count("rpc_url")) {
+        rpc_url = config["rpc_url"];
+    } else {
+        rpc_url = "http://127.0.0.1:18081/json_rpc";
+    }
+
     int user_thread_count = config.count("threads") ? std::stoi(config["threads"]) : 1;
     std::string output_dir = config.count("output_dir") ? config["output_dir"] : "out";
 
     int start_block = -1;
     int end_block = -1;
     int single_block = -1;
+    bool args_specified = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--range" && i + 2 < argc) {
             start_block = std::stoi(argv[++i]);
             end_block = std::stoi(argv[++i]);
+            args_specified = true;
         } else if (arg == "--block" && i + 1 < argc) {
             single_block = std::stoi(argv[++i]);
+            args_specified = true;
         } else if (arg == "--threads" && i + 1 < argc) {
-            std::string tval = argv[++i];
+            std::string tval = argv[i + 1];
             if (tval == "max") {
                 user_thread_count = std::thread::hardware_concurrency();
+                ++i;
             } else {
                 user_thread_count = std::stoi(tval);
+                ++i;
             }
         } else if (arg == "--server" && i + 1 < argc) {
             std::string server = argv[++i];
@@ -107,11 +112,11 @@ int main(int argc, char* argv[]) {
             std::cout << "\nUso: ./audit-xmr [opções]\n"
                       << "  --range <inicio> <fim>     Audita blocos do início ao fim\n"
                       << "  --block <altura>           Audita apenas um bloco específico\n"
-                      << "  --threads <N>|max          Define o número de threads (default do config: " << user_thread_count << ")\n"
-                      << "  --server <ip[:porta]>      Define o servidor RPC (default do config: " << rpc_url << ")\n"
-                      << "  --output-dir <dir>         Define o diretório de saída (default do config: " << output_dir << ")\n"
+                      << "  --threads <N>|max          Define o número de threads\n"
+                      << "  --server <ip[:porta]>      Define o servidor RPC\n"
+                      << "  --output-dir <dir>         Define o diretório de saída\n"
                       << "  -h, --help                 Mostra esta ajuda\n"
-                      << "  -v, --version              Mostra a versão do programa\n";
+                      << "  -v, --version              Mostra a versão\n";
             return 0;
         } else if (arg == "--version" || arg == "-v") {
             std::cout << "Versão: " << VER << std::endl;
@@ -126,105 +131,125 @@ int main(int argc, char* argv[]) {
 
     std::string csv_path = (out_dir / "auditoria_monero.csv").string();
     std::string log_path = (out_dir / "audit_log.txt").string();
-    g_log_path = log_path; // Define o caminho do log globalmente
+    g_log_path = log_path;
 
-    auto log = [&](const std::string& msg) {
-        log_message(log_path, msg);
+    auto log = [&](const std::string& msg, bool is_block_end = false) {
+        log_message(log_path, msg, is_block_end);
     };
 
     log("[INFO] Script iniciado");
+
+    // Variáveis para controle de escrita ordenada
+    std::mutex csv_mutex;
+    std::condition_variable csv_cv;
+    std::map<int, AuditResult> pending_results; // Armazena resultados temporariamente
+    int next_block_to_write = 0; // Próximo bloco a ser escrito no CSV
+
+    // Inicializa o CSV com o cabeçalho
+    {
+        std::lock_guard<std::mutex> lock(csv_mutex);
+        std::ofstream csv(csv_path);
+        if (!csv.is_open()) {
+            std::cerr << "[ERRO] Não foi possível abrir o arquivo CSV para escrita: " << csv_path << std::endl;
+            log("[ERRO] Não foi possível abrir o arquivo CSV para escrita: " + csv_path);
+            return 1;
+        }
+        csv << "Altura,Hash,RecompensaReal,CoinbaseOutputs,TotalMinerado,Problemas,Status\n";
+        csv.close();
+    }
+
+    auto write_to_csv = [&](const AuditResult& res) {
+        std::unique_lock<std::mutex> lock(csv_mutex);
+        pending_results[res.height] = res;
+
+        // Escreve todos os blocos prontos na ordem correta
+        while (pending_results.find(next_block_to_write) != pending_results.end()) {
+            const auto& r = pending_results[next_block_to_write];
+            std::ofstream csv(csv_path, std::ios::app);
+            if (!csv.is_open()) {
+                std::cerr << "[ERRO] Não foi possível abrir o arquivo CSV para escrita: " << csv_path << std::endl;
+                log("[ERRO] Não foi possível abrir o arquivo CSV para escrita: " + csv_path);
+                return;
+            }
+            csv << r.height << ',' << r.hash << ',' << r.real_reward << ','
+                << r.coinbase_outputs << ',' << r.total_mined << ','
+                << r.issues_string() << ',' << r.status << '\n';
+            csv.close();
+
+            log("[INFO] Bloco " + std::to_string(r.height) + " escrito no CSV: status=" + r.status);
+
+            pending_results.erase(next_block_to_write);
+            next_block_to_write++;
+        }
+        lock.unlock();
+        csv_cv.notify_all();
+    };
 
     if (single_block >= 0) {
         log("[INFO] Auditando bloco único: " + std::to_string(single_block));
         auto res = audit_block(single_block);
         if (res.has_value()) {
-            const auto& r = res.value();
-            std::cout << "\n🧱 Bloco " << r.height << " - Hash: " << r.hash << std::endl;
-            std::cout << "💰 Recompensa real: " << r.real_reward << " atomic units\n";
-            std::cout << "📤 Saídas CoinBase: " << r.coinbase_outputs << std::endl;
-            std::cout << "📦 Total minerado: " << r.total_mined << std::endl;
-            std::cout << "⚠️ Status: " << r.status << std::endl;
-            if (!r.issues.empty()) {
-                std::cout << "❗ Problemas:\n";
-                for (const auto& issue : r.issues) {
-                    std::cout << "  - " << issue << std::endl;
-                }
-            } else {
-                std::cout << "✅ Nenhum problema detectado.\n";
-            }
-            log("[INFO] Auditoria do bloco " + std::to_string(single_block) + " concluída: status=" + r.status);
+            write_to_csv(res.value());
         } else {
             std::cerr << "[ERRO] Auditoria falhou para o bloco " << single_block << std::endl;
-            log("[ERRO] Auditoria falhou para o bloco " + std::to_string(single_block));
+            log("[ERRO] Auditoria falhou para o bloco " + std::to_string(single_block), true);
+            return 1;
         }
-        return 0;
-    }
-
-    if (start_block < 0 || end_block < 0) {
-        start_block = 0;
-        end_block = get_blockchain_height() - 1;
-    }
-
-    log("[INFO] Iniciando auditoria de " + std::to_string(start_block) + " até " + std::to_string(end_block));
-
-    int max_threads = std::thread::hardware_concurrency();
-    if (user_thread_count > max_threads) {
-        std::cerr << "[AVISO] Foi solicitado " << user_thread_count << " threads, mas o sistema só possui " << max_threads << ". Usando mesmo assim.\n";
-        log("[AVISO] Threads solicitados: " + std::to_string(user_thread_count) + ", disponíveis: " + std::to_string(max_threads));
-    }
-
-    int thread_count = std::max(1, user_thread_count);
-    int total_blocks = end_block - start_block + 1;
-
-    std::vector<AuditResult> all_results;
-    std::mutex results_mutex;
-
-    auto worker = [&](int tid, int from, int to) {
-        std::vector<AuditResult> local_results;
-        for (int h = from; h <= to; ++h) {
-            log("[DEBUG] Thread " + std::to_string(tid) + " auditando bloco " + std::to_string(h));
-            auto res = audit_block(h);
-            if (res.has_value()) {
-                local_results.push_back(res.value());
-                log("[DEBUG] Bloco " + std::to_string(h) + " auditado com status " + res.value().status);
-            } else {
-                log("[ERRO] Falha na auditoria do bloco " + std::to_string(h));
+    } else {
+        if (!args_specified) {
+            start_block = 0;
+            end_block = get_blockchain_height() - 1;
+            if (end_block < 0) {
+                std::cerr << "[ERRO] Não foi possível obter a altura da blockchain." << std::endl;
+                log("[ERRO] Falha ao obter altura da blockchain via RPC.");
+                return 1;
             }
+            log("[INFO] Nenhum argumento fornecido. Auditando todos os blocos de 0 a " + std::to_string(end_block));
         }
-        std::lock_guard<std::mutex> lock(results_mutex);
-        all_results.insert(all_results.end(), local_results.begin(), local_results.end());
-    };
 
-    std::vector<std::thread> threads;
-    int chunk_size = total_blocks / thread_count;
-    int remainder = total_blocks % thread_count;
-    int current = start_block;
-    for (int i = 0; i < thread_count; ++i) {
-        int extra = (i < remainder) ? 1 : 0;
-        int range_size = chunk_size + extra;
-        int from = current;
-        int to = current + range_size - 1;
-        current = to + 1;
-        log("[DEBUG] Iniciando thread " + std::to_string(i) + " para blocos " + std::to_string(from) + "-" + std::to_string(to));
-        threads.emplace_back(worker, i, from, to);
+        log("[INFO] Iniciando auditoria de " + std::to_string(start_block) + " até " + std::to_string(end_block));
+
+        int max_threads = std::thread::hardware_concurrency();
+        if (user_thread_count > max_threads) {
+            std::cerr << "[AVISO] Threads solicitadas excedem o máximo do sistema. Continuando assim mesmo.\n";
+        }
+
+        int thread_count = std::max(1, user_thread_count);
+        int total_blocks = end_block - start_block + 1;
+
+        next_block_to_write = start_block; // Inicializa com o primeiro bloco do intervalo
+
+        auto worker = [&](int tid, int from, int to) {
+            for (int h = from; h <= to; ++h) {
+                log("[DEBUG] Thread " + std::to_string(tid) + " auditando bloco " + std::to_string(h));
+                auto res = audit_block(h);
+                if (res.has_value()) {
+                    write_to_csv(res.value());
+                } else {
+                    log("[ERRO] Falha na auditoria do bloco " + std::to_string(h), true);
+                }
+            }
+        };
+
+        std::vector<std::thread> threads;
+        int chunk_size = total_blocks / thread_count;
+        int remainder = total_blocks % thread_count;
+        int current = start_block;
+        for (int i = 0; i < thread_count; ++i) {
+            int extra = (i < remainder) ? 1 : 0;
+            int range_size = chunk_size + extra;
+            int from = current;
+            int to = current + range_size - 1;
+            current = to + 1;
+            threads.emplace_back(worker, i, from, to);
+        }
+
+        for (auto& t : threads) t.join();
     }
 
-    for (auto& t : threads) t.join();
-
-    std::sort(all_results.begin(), all_results.end(), [](const auto& a, const auto& b) {
-        return a.height < b.height;
-    });
-
-    std::ofstream csv(csv_path);
-    csv << "Altura,Hash,RecompensaReal,CoinbaseOutputs,TotalMinerado,Problemas,Status\n";
-    for (const auto& res : all_results) {
-        csv << res.height << ',' << res.hash << ',' << res.real_reward << ','
-            << res.coinbase_outputs << ',' << res.total_mined << ','
-            << res.issues_string() << ',' << res.status << '\n';
-    }
-    csv.close();
-
-    log("[INFO] Auditoria finalizada. Resultado salvo em: " + csv_path);
+    // Escrever os resultados finais no log em ordem (opcional, para consistência)
     std::cout << "Auditoria concluída. Resultados salvos em: " << csv_path << std::endl;
+    log("[INFO] Auditoria finalizada. Resultados salvos em: " + csv_path);
+
     return 0;
 }

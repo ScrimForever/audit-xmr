@@ -12,6 +12,7 @@ add_executable(audit-xmr
     audit-xmr.cpp
     audit.cpp
     rpc.cpp
+    log.cpp  # Adicionado aqui
 )
 
 target_include_directories(audit-xmr PRIVATE ${CURL_INCLUDE_DIR})
@@ -22,6 +23,7 @@ add_executable(audit-xmr-check
     audit-xmr-check.cpp
     audit.cpp
     rpc.cpp
+    log.cpp  # Adicionado aqui
 )
 
 target_include_directories(audit-xmr-check PRIVATE ${CURL_INCLUDE_DIR})

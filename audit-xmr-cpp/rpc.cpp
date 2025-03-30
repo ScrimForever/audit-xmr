@@ -1,4 +1,5 @@
 #include "rpc.hpp"
+#include "audit.hpp" // Incluído para acessar a declaração de log_message
 #include <iostream>
 #include <sstream>
 #include <curl/curl.h>
@@ -13,7 +14,7 @@ void set_rpc_url(const std::string& url) {
     RPC_URL = url;
     std::stringstream ss;
     ss << "[DEBUG] RPC_URL definida como " << url;
-    log_message(g_log_path, ss.str());
+    log_message(g_log_path, ss.str(), false);
 }
 
 static size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* userp) {
@@ -24,13 +25,13 @@ static size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* use
 std::string rpc_call(const std::string& method, const std::string& params_json) {
     std::stringstream ss;
     ss << "[DEBUG] Chamando RPC: " << method << " com params " << params_json;
-    log_message(g_log_path, ss.str());
+    log_message(g_log_path, ss.str(), false);
 
     CURL* curl = curl_easy_init();
     if (!curl) return "";
 
     std::string response_string;
-    std::string post_fields = R"({"jsonrpc":"2.0","id":"0","method":")" 
+    std::string post_fields = R"({"jsonrpc":"2.0","id":"0","method":")"
                                 + method + R"(","params":)" + params_json + "}";
 
     curl_easy_setopt(curl, CURLOPT_URL, RPC_URL.c_str());
@@ -44,29 +45,29 @@ std::string rpc_call(const std::string& method, const std::string& params_json) 
 
     if (res != CURLE_OK) {
         ss.str("");
-        ss << "[ERRO] Falha na chamada CURL para " << method << ": " 
+        ss << "[ERRO] Falha na chamada CURL para " << method << ": "
            << curl_easy_strerror(res);
-        log_message(g_log_path, ss.str());
+        log_message(g_log_path, ss.str(), false);
         return "";
     }
 
     ss.str("");
     ss << "[DEBUG] Resposta RPC " << method << ": " << response_string;
-    log_message(g_log_path, ss.str());
+    log_message(g_log_path, ss.str(), false);
     return response_string;
 }
 
 int get_blockchain_height() {
     std::string res = rpc_call("get_block_count", "{}");
     if (res.empty()) {
-        log_message(g_log_path, "[ERRO] RPC 'get_block_count' retornou vazio.");
+        log_message(g_log_path, "[ERRO] RPC 'get_block_count' retornou vazio.", false);
         return -1;
     }
     try {
         json parsed = json::parse(res);
         return parsed["result"]["count"];
     } catch (...) {
-        log_message(g_log_path, "[ERRO] Falha ao parsear resposta de get_block_count");
+        log_message(g_log_path, "[ERRO] Falha ao parsear resposta de get_block_count", false);
         return -1;
     }
 }
@@ -77,23 +78,23 @@ json get_block_info(int height) {
     if (res.empty()) {
         std::stringstream ss;
         ss << "[ERRO] Falha ao obter bloco " << height;
-        log_message(g_log_path, ss.str());
+        log_message(g_log_path, ss.str(), false);
         return nullptr;
     }
     try {
         json parsed = json::parse(res);
         if (parsed.find("error") != parsed.end()) {
             std::stringstream ss;
-            ss << "[ERRO] RPC get_block retornou erro para o bloco " << height 
+            ss << "[ERRO] RPC get_block retornou erro para o bloco " << height
                << ": " << parsed["error"];
-            log_message(g_log_path, ss.str());
+            log_message(g_log_path, ss.str(), false);
             return nullptr;
         }
         return parsed["result"];
     } catch (...) {
         std::stringstream ss;
         ss << "[ERRO] Falha ao parsear bloco " << height;
-        log_message(g_log_path, ss.str());
+        log_message(g_log_path, ss.str(), false);
         return nullptr;
     }
 }
@@ -105,13 +106,13 @@ json get_transaction_details(const std::string& tx_hash) {
     };
     std::string res = rpc_call("get_transactions", params.dump());
     if (res.empty()) return nullptr;
-    
+
     try {
         json parsed = json::parse(res);
         if (parsed.contains("error")) {
             std::stringstream ss;
             ss << "[AVISO] RPC get_transactions não suportado para " << tx_hash;
-            log_message(g_log_path, ss.str());
+            log_message(g_log_path, ss.str(), false);
             return nullptr;
         }
         if (parsed["result"]["txs"].empty()) return nullptr;
@@ -119,7 +120,7 @@ json get_transaction_details(const std::string& tx_hash) {
     } catch (...) {
         std::stringstream ss;
         ss << "[ERRO] Falha ao parsear transação " << tx_hash;
-        log_message(g_log_path, ss.str());
+        log_message(g_log_path, ss.str(), false);
         return nullptr;
     }
 }
