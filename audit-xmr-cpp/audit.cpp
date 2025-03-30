@@ -1,6 +1,7 @@
 #include "audit.hpp"
 #include "rpc.hpp"
 #include <sstream>
+#include <cmath> // Para std::abs
 
 using json = nlohmann::json;
 
@@ -27,28 +28,21 @@ std::optional<AuditResult> audit_block(int height) {
     ss << "[DEBUG] Bloco " << height << " obtido com hash " << result.hash;
     log_message(g_log_path, ss.str());
 
+    // Processa o JSON do bloco para extrair os dados da transação coinbase
     json block_json = json::parse(block_info["json"].get<std::string>());
     json miner_tx = block_json["miner_tx"];
 
     uint64_t coinbase_sum = 0;
     for (const auto& vout : miner_tx["vout"]) {
-        coinbase_sum += vout["amount"].get<uint64_t>();
+        coinbase_sum += vout["amount"].template get<uint64_t>(); // Uso de 'template' para evitar ambiguidades
     }
     ss.str("");
     ss << "[DEBUG] Saídas CoinBase bloco " << height << ": " << coinbase_sum;
     log_message(g_log_path, ss.str());
 
+    // Como o cálculo do supply se baseia apenas na coinbase,
+    // quaisquer transações adicionais (tx_hashes) são ignoradas.
     uint64_t tx_outputs = 0;
-    if (block_json.contains("tx_hashes")) {
-        for (const auto& tx_hash : block_json["tx_hashes"]) {
-            auto tx = get_transaction_details(tx_hash);
-            if (!tx.is_null()) {
-                for (const auto& vout : tx["vout"]) {
-                    tx_outputs += vout["amount"].get<uint64_t>();
-                }
-            }
-        }
-    }
     ss.str("");
     ss << "[DEBUG] Total saídas TX bloco " << height << ": " << tx_outputs;
     log_message(g_log_path, ss.str());
@@ -59,25 +53,28 @@ std::optional<AuditResult> audit_block(int height) {
     result.total_mined = coinbase_sum + tx_outputs;
 
     ss.str("");
-    ss << "[DEBUG] Recompensa real bloco " << height << ": " << reward << ", Total minerado: " << result.total_mined;
+    ss << "[DEBUG] Recompensa real bloco " << height << ": " << reward
+       << ", Total minerado: " << result.total_mined;
     log_message(g_log_path, ss.str());
 
+    // Verificações simples para garantir a consistência dos dados
     const uint64_t TOLERANCE = 1e9;
-
     if (std::abs((int64_t)(reward - coinbase_sum)) > TOLERANCE) {
         result.issues.push_back("Reward != CoinBase");
     }
     if (std::abs((int64_t)(reward - result.total_mined)) > TOLERANCE) {
         result.issues.push_back("Reward != TotalMined");
     }
-    if (miner_tx["vin"].size() != 1 || miner_tx["vin"][0]["gen"]["height"].get<int>() != height) {
+    if (miner_tx["vin"].size() != 1 ||
+        miner_tx["vin"][0]["gen"]["height"].get<int>() != height) {
         result.issues.push_back("CoinBase inválida");
     }
 
     result.status = result.issues.empty() ? "OK" : "Discrepância";
 
     ss.str("");
-    ss << "[DEBUG] Resultado bloco " << height << ": status=" << result.status << ", issues=" << result.issues_string();
+    ss << "[DEBUG] Resultado bloco " << height << ": status=" << result.status
+       << ", issues=" << result.issues_string();
     log_message(g_log_path, ss.str());
 
     return result;

@@ -14,6 +14,8 @@
 #include <map>
 #include <chrono>
 #include <iomanip>
+#include <csignal>
+#include <condition_variable>
 
 #include "audit.hpp"
 #include "rpc.hpp"
@@ -23,6 +25,17 @@
 namespace fs = std::filesystem;
 
 std::string g_log_path; // Definida globalmente para ser acessada por todos os arquivos
+std::string g_rpc_url;  // Servidor RPC global
+std::mutex log_mutex;   // Mutex para sincronizar os logs
+std::mutex queue_mutex; // Mutex para sincronizar o mapa
+std::condition_variable queue_cv; // Condição para notificar a thread de escrita
+std::map<int, AuditResult> result_map; // Mapa ordenado por altura
+std::atomic<bool> interrupted(false);  // Flag para interrupção
+std::atomic<bool> done(false);         // Flag para indicar que todas as threads terminaram
+std::string g_csv_path;                // Caminho do CSV global
+int g_max_retries = 99;                // Número máximo de retentativas (padrão)
+int g_timeout = 20;                    // Timeout em segundos (padrão)
+int g_start_block = 0;                 // Bloco inicial para escrita sequencial
 
 // Função de log com timestamp
 void log_message(const std::string& log_path, const std::string& message) {
@@ -31,9 +44,62 @@ void log_message(const std::string& log_path, const std::string& message) {
     std::stringstream timestamp;
     timestamp << std::put_time(std::localtime(&time), "%Y-%m-%d %H:%M:%S");
 
+    std::lock_guard<std::mutex> lock(log_mutex);
     std::ofstream log_file(log_path, std::ios::app);
     if (log_file.is_open()) {
         log_file << "[" << timestamp.str() << "] " << message << std::endl;
+    }
+}
+
+// Função para escrever resultados no CSV a partir do mapa
+void csv_writer_thread(int start_block, int end_block) {
+    std::ofstream csv(g_csv_path, std::ios::app); // Abrir em modo append
+    if (!csv.is_open()) {
+        log_message(g_log_path, "[ERRO] Não foi possível abrir o arquivo CSV: " + g_csv_path);
+        return;
+    }
+
+    // Escrever o cabeçalho apenas se o arquivo estiver vazio
+    std::ifstream check_csv(g_csv_path);
+    if (check_csv.peek() == std::ifstream::traits_type::eof()) {
+        csv << "Altura,Hash,RecompensaReal,CoinbaseOutputs,TotalMinerado,Problemas,Status\n";
+    }
+    check_csv.close();
+
+    int next_height = start_block;
+    while (!done || next_height <= end_block) {
+        std::unique_lock<std::mutex> lock(queue_mutex);
+        queue_cv.wait(lock, [&] { return result_map.count(next_height) || done; });
+
+        if (result_map.count(next_height)) {
+            AuditResult r = result_map[next_height];
+            result_map.erase(next_height); // Remover após escrever
+            lock.unlock(); // Liberar o mutex enquanto escreve no arquivo
+
+            csv << r.height << ',' << r.hash << ',' << r.real_reward << ','
+                << r.coinbase_outputs << ',' << r.total_mined << ','
+                << r.issues_string() << ',' << r.status << '\n';
+
+            next_height++;
+            lock.lock(); // Rebloquear para verificar o próximo
+        } else if (done) {
+            break; // Se todas as threads terminaram e o próximo bloco não está presente, sair
+        }
+        lock.unlock();
+    }
+
+    csv.close();
+    log_message(g_log_path, "[INFO] Thread de escrita finalizada. CSV salvo em: " + g_csv_path);
+}
+
+// Handler de sinal para Ctrl+C
+void signal_handler(int signal) {
+    if (signal == SIGINT) {
+        interrupted = true;
+        done = true; // Sinalizar que as threads devem parar
+        queue_cv.notify_all(); // Acordar a thread de escrita
+        log_message(g_log_path, "[INFO] Interrupção detectada (Ctrl+C). Finalizando e salvando resultados...");
+        std::cout << "Interrompido. Resultados salvos em: " << g_csv_path << std::endl;
     }
 }
 
@@ -65,12 +131,16 @@ std::map<std::string, std::string> load_config(const std::string& config_file) {
 }
 
 int main(int argc, char* argv[]) {
+    std::signal(SIGINT, signal_handler);
+
     std::string config_file = "audit-xmr.cfg";
     auto config = load_config(config_file);
 
     std::string rpc_url = config.count("rpc_url") ? config["rpc_url"] : "http://127.0.0.1:18081/json_rpc";
     int user_thread_count = config.count("threads") ? std::stoi(config["threads"]) : 1;
     std::string output_dir = config.count("output_dir") ? config["output_dir"] : "out";
+    g_max_retries = config.count("max_retries") ? std::stoi(config["max_retries"]) : 99;
+    g_timeout = config.count("timeout") ? std::stoi(config["timeout"]) : 20;
 
     int start_block = -1;
     int end_block = -1;
@@ -116,19 +186,21 @@ int main(int argc, char* argv[]) {
     }
 
     set_rpc_url(rpc_url);
+    g_rpc_url = rpc_url;
 
     fs::path out_dir = fs::path(output_dir);
     fs::create_directories(out_dir);
 
-    std::string csv_path = (out_dir / "auditoria_monero.csv").string();
+    g_csv_path = (out_dir / "auditoria_monero.csv").string();
     std::string log_path = (out_dir / "audit_log.txt").string();
-    g_log_path = log_path; // Atribuir o caminho do log à variável global
+    g_log_path = log_path;
 
     auto log = [&](const std::string& msg) {
         log_message(log_path, msg);
     };
 
-    log("[INFO] Script iniciado");
+    log("[INFO] Script iniciado com servidor RPC: " + g_rpc_url);
+    log("[INFO] Configurações: max_retries=" + std::to_string(g_max_retries) + ", timeout=" + std::to_string(g_timeout) + "s");
 
     if (single_block >= 0) {
         log("[INFO] Auditando bloco único: " + std::to_string(single_block));
@@ -149,6 +221,16 @@ int main(int argc, char* argv[]) {
                 std::cout << "✅ Nenhum problema detectado.\n";
             }
             log("[INFO] Auditoria do bloco " + std::to_string(single_block) + " concluída: status=" + r.status);
+
+            std::lock_guard<std::mutex> lock(queue_mutex);
+            result_map[single_block] = r;
+            queue_cv.notify_one();
+            std::ofstream csv(g_csv_path);
+            csv << "Altura,Hash,RecompensaReal,CoinbaseOutputs,TotalMinerado,Problemas,Status\n";
+            csv << r.height << ',' << r.hash << ',' << r.real_reward << ','
+                << r.coinbase_outputs << ',' << r.total_mined << ','
+                << r.issues_string() << ',' << r.status << '\n';
+            csv.close();
         } else {
             std::cerr << "[ERRO] Auditoria falhou para o bloco " << single_block << std::endl;
             log("[ERRO] Auditoria falhou para o bloco " + std::to_string(single_block));
@@ -159,8 +241,10 @@ int main(int argc, char* argv[]) {
     if (start_block < 0 || end_block < 0) {
         start_block = 0;
         end_block = get_blockchain_height() - 1;
+        log("[INFO] Intervalo não especificado. Usando do bloco " + std::to_string(start_block) + " até " + std::to_string(end_block));
     }
 
+    g_start_block = start_block;
     log("[INFO] Iniciando auditoria de " + std::to_string(start_block) + " até " + std::to_string(end_block));
 
     int max_threads = std::thread::hardware_concurrency();
@@ -172,23 +256,23 @@ int main(int argc, char* argv[]) {
     int thread_count = std::max(1, user_thread_count);
     int total_blocks = end_block - start_block + 1;
 
-    std::vector<AuditResult> all_results;
-    std::mutex results_mutex;
+    std::thread csv_writer(csv_writer_thread, start_block, end_block);
+    csv_writer.detach();
 
     auto worker = [&](int tid, int from, int to) {
-        std::vector<AuditResult> local_results;
-        for (int h = from; h <= to; ++h) {
+        for (int h = from; h <= to && !interrupted; ++h) {
             log("[DEBUG] Thread " + std::to_string(tid) + " auditando bloco " + std::to_string(h));
             auto res = audit_block(h);
             if (res.has_value()) {
-                local_results.push_back(res.value());
-                log("[DEBUG] Bloco " + std::to_string(h) + " auditado com status " + res.value().status);
+                const auto& r = res.value();
+                log("[DEBUG] Bloco " + std::to_string(h) + " auditado com status " + r.status);
+                std::lock_guard<std::mutex> lock(queue_mutex);
+                result_map[h] = r;
+                queue_cv.notify_one();
             } else {
                 log("[ERRO] Falha na auditoria do bloco " + std::to_string(h));
             }
         }
-        std::lock_guard<std::mutex> lock(results_mutex);
-        all_results.insert(all_results.end(), local_results.begin(), local_results.end());
     };
 
     std::vector<std::thread> threads;
@@ -201,22 +285,18 @@ int main(int argc, char* argv[]) {
         threads.emplace_back(worker, i, from, to);
     }
 
-    for (auto& t : threads) t.join();
-
-    std::sort(all_results.begin(), all_results.end(), [](const auto& a, const auto& b) {
-        return a.height < b.height;
-    });
-
-    std::ofstream csv(csv_path);
-    csv << "Altura,Hash,RecompensaReal,CoinbaseOutputs,TotalMinerado,Problemas,Status\n";
-    for (const auto& res : all_results) {
-        csv << res.height << ',' << res.hash << ',' << res.real_reward << ','
-            << res.coinbase_outputs << ',' << res.total_mined << ','
-            << res.issues_string() << ',' << res.status << '\n';
+    for (auto& t : threads) {
+        t.join();
     }
-    csv.close();
 
-    log("[INFO] Auditoria finalizada. Resultado salvo em: " + csv_path);
-    std::cout << "Auditoria concluída. Resultados salvos em: " << csv_path << std::endl;
+    done = true;
+    queue_cv.notify_one();
+
+    if (!interrupted) {
+        log("[INFO] Auditoria finalizada. Aguardando escrita final no CSV...");
+        std::this_thread::sleep_for(std::chrono::seconds(1)); // Dar tempo para a thread de escrita finalizar
+        std::cout << "Auditoria concluída. Resultados salvos em: " << g_csv_path << std::endl;
+    }
+
     return 0;
 }

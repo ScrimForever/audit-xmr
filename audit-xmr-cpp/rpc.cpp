@@ -98,9 +98,16 @@ json get_transaction_details(const std::string& tx_hash) {
     };
     std::string res = rpc_call("get_transactions", params.dump());
     if (res.empty()) return nullptr;
-
+    
     try {
         json parsed = json::parse(res);
+        // Se o RPC retornar um erro, registra aviso e retorna nulo
+        if (parsed.contains("error")) {
+            std::stringstream ss;
+            ss << "[AVISO] RPC get_transactions não suportado para " << tx_hash;
+            log_message(g_log_path, ss.str());
+            return nullptr;
+        }
         if (parsed["result"]["txs"].empty()) return nullptr;
         return json::parse(parsed["result"]["txs"][0]["as_json"].get<std::string>());
     } catch (...) {
