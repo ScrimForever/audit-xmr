@@ -30,7 +30,8 @@ std::string rpc_call(const std::string& method, const std::string& params_json) 
     if (!curl) return "";
 
     std::string response_string;
-    std::string post_fields = R"({"jsonrpc":"2.0","id":"0","method":")" + method + R"(","params":)" + params_json + "}";
+    std::string post_fields = R"({"jsonrpc":"2.0","id":"0","method":")" 
+                                + method + R"(","params":)" + params_json + "}";
 
     curl_easy_setopt(curl, CURLOPT_URL, RPC_URL.c_str());
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, post_fields.c_str());
@@ -43,7 +44,8 @@ std::string rpc_call(const std::string& method, const std::string& params_json) 
 
     if (res != CURLE_OK) {
         ss.str("");
-        ss << "[ERRO] Falha na chamada CURL para " << method << ": " << curl_easy_strerror(res);
+        ss << "[ERRO] Falha na chamada CURL para " << method << ": " 
+           << curl_easy_strerror(res);
         log_message(g_log_path, ss.str());
         return "";
     }
@@ -79,9 +81,16 @@ json get_block_info(int height) {
         log_message(g_log_path, ss.str());
         return nullptr;
     }
-
     try {
         json parsed = json::parse(res);
+        // Se a resposta contiver "error", logue o erro e retorne null
+        if (parsed.find("error") != parsed.end()) {
+            std::stringstream ss;
+            ss << "[ERRO] RPC get_block retornou erro para o bloco " << height 
+               << ": " << parsed["error"];
+            log_message(g_log_path, ss.str());
+            return nullptr;
+        }
         return parsed["result"];
     } catch (...) {
         std::stringstream ss;
@@ -101,7 +110,6 @@ json get_transaction_details(const std::string& tx_hash) {
     
     try {
         json parsed = json::parse(res);
-        // Se o RPC retornar um erro, registra aviso e retorna nulo
         if (parsed.contains("error")) {
             std::stringstream ss;
             ss << "[AVISO] RPC get_transactions não suportado para " << tx_hash;
