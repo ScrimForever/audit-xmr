@@ -28,3 +28,17 @@
    git clone https://github.com/area31/audit-xmr.git
    cd audit-xmr
    g++ audit-xmr.cpp audit.cpp rpc.cpp -o audit-xmr -std=c++17 -lcurl -lpthread
+
+
+## Performance do Python vs C++
+Abaixo estão os resultados visuais comparando o desempenho das versões Python e C++ ao auditar blocos da blockchain Monero.
+
+- **Tempo de Execução para Intervalo Pequeno (ex.: 444-446)**
+  ![Comparação de Desempenho - Intervalo Pequeno](screenshots/compare1.png)
+  *Legenda*: O C++ com multi-threading é significativamente mais rápido que o Python single-threaded para pequenos intervalos.
+
+- **Tempo de Execução para Intervalo Grande (ex.: 1000 blocos)**
+  ![Comparação de Desempenho - Intervalo Grande](screenshots/compare2.png)
+  *Legenda*: O C++ escalona melhor com o aumento do número de blocos, enquanto o Python mostra desempenho linear.
+
+*Nota*: Os tempos podem variar dependendo do hardware, configuração de threads e latência da rede RPC.
