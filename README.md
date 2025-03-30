@@ -25,6 +25,6 @@
 ### C++
 1. Clone o repositório:
    ```bash
-   git clone https://github.com/<seu-usuario>/audit-xmr.git
+   git clone https://github.com/area31/audit-xmr.git
    cd audit-xmr
    g++ audit-xmr.cpp audit.cpp rpc.cpp -o audit-xmr -std=c++17 -lcurl -lpthread
