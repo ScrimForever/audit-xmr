@@ -1,6 +1,6 @@
 emerge -av nlohmann_json
 
-zypper install gcc13 gcc13-c++
+zypper install gcc13 gcc13-c++ libcurl-devel nlohmann_json-devel
 
 update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 100
 
