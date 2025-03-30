@@ -4,6 +4,10 @@
 #include <vector>
 #include <string>
 #include <cstdlib>
+#include <chrono>
+#include <ctime>
+#include <iomanip>
+#include <map>
 #include "audit.hpp"
 #include "rpc.hpp"
 #include <nlohmann/json.hpp>
@@ -11,6 +15,44 @@
 using namespace std;
 using json = nlohmann::json;
 
+// Nome do arquivo de log de debug
+std::string g_log_path = "audit_check_debug.log";
+
+// Função de log que escreve mensagens com timestamp no arquivo g_log_path
+void log_message(const std::string& log_path, const std::string& message) {
+    std::ofstream log_file(log_path, std::ios::app);
+    if (log_file.is_open()) {
+        auto now = std::chrono::system_clock::now();
+        std::time_t t = std::chrono::system_clock::to_time_t(now);
+        log_file << "[" << std::put_time(std::localtime(&t), "%Y-%m-%d %H:%M:%S") << "] " << message << "\n";
+    }
+}
+
+// Função para carregar configurações do arquivo cfg
+std::map<std::string, std::string> load_config(const std::string &config_file) {
+    std::map<std::string, std::string> config;
+    std::ifstream file(config_file);
+    if (!file.is_open())
+        return config;
+    std::string line;
+    while (std::getline(file, line)) {
+        if(line.empty() || line[0] == '#') continue;
+        std::istringstream iss(line);
+        std::string key, value;
+        if(std::getline(iss, key, '=') && std::getline(iss, value)) {
+            // Remover espaços em branco
+            key.erase(0, key.find_first_not_of(" \t"));
+            key.erase(key.find_last_not_of(" \t") + 1);
+            value.erase(0, value.find_first_not_of(" \t"));
+            value.erase(value.find_last_not_of(" \t") + 1);
+            config[key] = value;
+        }
+    }
+    file.close();
+    return config;
+}
+
+// Estrutura para armazenar um registro do CSV
 struct CSVRecord {
     int height;
     string hash;
@@ -44,22 +86,42 @@ bool parseCSVLine(const string& line, CSVRecord& record) {
     return true;
 }
 
-// Definições dummy para g_log_path e log_message, para que as funções do projeto funcionem sem produzir log.
-std::string g_log_path = "";
-void log_message(const std::string& log_path, const std::string& message) {
-    // Neste binário não se imprime log.
-}
-
 int main(int argc, char* argv[]) {
-    if(argc < 2) {
-        cout << "Uso: " << argv[0] << " <arquivo_csv>" << endl;
-        return 1;
+    log_message(g_log_path, "Início da validação via RPC.");
+
+    // Determina o servidor RPC: tenta --server na linha de comando, senão usa o arquivo de configuração.
+    std::string server;
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if(arg == "--server" && i+1 < argc) {
+            server = argv[++i];
+        }
+    }
+    if(server.empty()){
+        auto config = load_config("audit-xmr.cfg");
+        if(config.find("rpc_url") != config.end()){
+            server = config["rpc_url"];
+        }
+    }
+    if(!server.empty()){
+        // Se não incluir o protocolo, assume http://
+        if(server.find("http://") == std::string::npos && server.find("https://") == std::string::npos)
+            server = "http://" + server;
+        // Se não conter "/json_rpc", acrescenta-o
+        if(server.find("/json_rpc") == std::string::npos)
+            server = server + "/json_rpc";
+        set_rpc_url(server);
+        log_message(g_log_path, "Server RPC configurado: " + server);
+    } else {
+        log_message(g_log_path, "Nenhum servidor RPC definido; usando o padrão.");
     }
 
+    // Carrega os registros do arquivo CSV
     string csvFilename = argv[1];
     ifstream infile(csvFilename);
     if(!infile.is_open()){
-        cerr << "Erro ao abrir arquivo: " << csvFilename << endl;
+        cerr << "Error opening file: " << csvFilename << endl;
+        log_message(g_log_path, "Erro: não foi possível abrir o arquivo CSV: " + csvFilename);
         return 1;
     }
 
@@ -79,19 +141,21 @@ int main(int argc, char* argv[]) {
          }
     }
     infile.close();
-    
+    log_message(g_log_path, "Arquivo CSV lido com " + std::to_string(csvRecords.size()) + " registros.");
+
     int okCount = 0, errorCount = 0;
     for(const auto& rec : csvRecords) {
+         log_message(g_log_path, "Auditoria do bloco " + std::to_string(rec.height) + " iniciada.");
          auto auditResultOpt = audit_block(rec.height);
          if(!auditResultOpt.has_value()){
              cout << "Bloco " << rec.height << ": erro ao auditar via RPC" << endl;
-             // Debug: chama get_block_info para imprimir a resposta bruta
+             log_message(g_log_path, "Erro: audit_block(" + std::to_string(rec.height) + ") retornou null.");
+             // Debug: chama get_block_info para exibir a resposta bruta
              json blockInfo = get_block_info(rec.height);
              if(blockInfo.is_null()){
-                 cout << "  Debug: get_block(" << rec.height << ") retornou null." << endl;
+                 log_message(g_log_path, "Debug: get_block(" + std::to_string(rec.height) + ") retornou null.");
              } else {
-                 cout << "  Debug: get_block(" << rec.height << ") retornou:" << endl;
-                 cout << blockInfo.dump(2) << endl;
+                 log_message(g_log_path, "Debug: get_block(" + std::to_string(rec.height) + ") retornou:\n" + blockInfo.dump(2));
              }
              errorCount++;
              continue;
@@ -126,14 +190,19 @@ int main(int argc, char* argv[]) {
          }
          if(match) {
              cout << "Bloco " << rec.height << ": OK" << endl;
+             log_message(g_log_path, "Bloco " + std::to_string(rec.height) + " auditado: OK.");
              okCount++;
          } else {
              cout << "Bloco " << rec.height << ": ERRO (" << details.str() << ")" << endl;
+             log_message(g_log_path, "Bloco " + std::to_string(rec.height) + " auditado: ERRO (" + details.str() + ").");
              errorCount++;
          }
     }
 
-    cout << "Resumo: " << okCount << " blocos OK, " << errorCount 
-         << " blocos com discrepâncias." << endl;
+    ostringstream summary;
+    summary << "Resumo: " << okCount << " blocos OK, " << errorCount << " blocos com discrepâncias.";
+    cout << summary.str() << endl;
+    log_message(g_log_path, summary.str());
+    log_message(g_log_path, "Validação via RPC finalizada.");
     return 0;
 }

@@ -62,7 +62,6 @@ int get_blockchain_height() {
         log_message(g_log_path, "[ERRO] RPC 'get_block_count' retornou vazio.");
         return -1;
     }
-
     try {
         json parsed = json::parse(res);
         return parsed["result"]["count"];
@@ -83,7 +82,6 @@ json get_block_info(int height) {
     }
     try {
         json parsed = json::parse(res);
-        // Se a resposta contiver "error", logue o erro e retorne null
         if (parsed.find("error") != parsed.end()) {
             std::stringstream ss;
             ss << "[ERRO] RPC get_block retornou erro para o bloco " << height 
